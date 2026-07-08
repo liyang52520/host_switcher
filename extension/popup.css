@@ -1,0 +1,246 @@
+/* popup.css - Host Switcher（SwitchHost 风格：左组列表 + 右 hosts 编辑器） */
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  width: 720px;
+  margin: 0;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  color: #222;
+  background: #fafbfc;
+  min-height: 460px;
+}
+
+code {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: #eef0f3;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* ---- Top bar ---- */
+.topbar {
+  padding: 10px 14px 6px;
+  border-bottom: 1px solid #e6e8eb;
+  background: #fff;
+}
+.topbar h1 { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
+.topbar .hint { font-size: 11.5px; color: #888; }
+
+/* ---- Status bar ---- */
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: #fff;
+  border-bottom: 1px solid #e6e8eb;
+  font-size: 12px;
+}
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #ccc; display: inline-block; flex: none;
+}
+.dot.ok { background: #34c759; box-shadow: 0 0 0 2px rgba(52,199,89,.18); }
+.dot.err { background: #ff3b30; box-shadow: 0 0 0 2px rgba(255,59,48,.18); }
+#statusText { flex: 1; color: #555; }
+.switch.global .lbl { margin-left: 4px; color: #555; font-size: 12px; }
+#globalEnabled:disabled + .slider { opacity: 0.4; cursor: not-allowed; }
+#globalEnabled:disabled ~ .lbl { opacity: 0.4; cursor: not-allowed; }
+
+/* ---- Layout ---- */
+.layout {
+  display: flex;
+  align-items: stretch;
+  min-height: 380px;
+}
+.groups {
+  width: 220px;
+  flex: none;
+  background: #f3f4f6;
+  border-right: 1px solid #e6e8eb;
+  display: flex;
+  flex-direction: column;
+}
+.group-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  flex: 1;
+  overflow: auto;
+}
+.group-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 4px;
+  border-left: 3px solid transparent;
+  user-select: none;
+  position: relative;
+}
+.group-item:hover { background: #e8eaed; }
+.group-item.active { background: #dbeafe; border-left-color: #3b82f6; }
+.group-item.off .group-name { color: #999; }
+.group-item .group-name {
+  flex: 1;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+.group-item .group-name:hover { background: rgba(0,0,0,.04); }
+.group-item .group-count {
+  font-size: 11px;
+  color: #888;
+  background: #fff;
+  border: 1px solid #e0e2e6;
+  border-radius: 10px;
+  padding: 0 7px;
+  min-width: 20px;
+  text-align: center;
+  flex: none;
+}
+.group-item.active .group-count { border-color: #93c5fd; color: #1d4ed8; }
+.group-item.off .group-count { color: #bbb; }
+.group-del {
+  border: none;
+  background: transparent;
+  color: #999;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  flex: none;
+  opacity: 0;
+  transition: opacity .12s, background .12s;
+}
+.group-item:hover .group-del { opacity: 1; }
+.group-del:hover { background: #fee2e2; color: #dc2626; }
+
+.editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  min-width: 0;
+}
+.editor-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  color: #999;
+  text-align: center;
+  padding: 24px;
+}
+.editor-empty p { margin: 4px 0; }
+.editor-empty .muted { color: #aaa; font-size: 12px; max-width: 340px; }
+.editor-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+/* 左侧组名编辑输入框（双击进入） */
+.group-name-edit {
+  flex: 1;
+  font: inherit;
+  font-size: 13px;
+  padding: 2px 4px;
+  border: 1px solid #3b82f6;
+  border-radius: 3px;
+  background: #fff;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(59,130,246,.15);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.group-item input[type="checkbox"]:disabled + .slider {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#groupContent {
+  flex: 1;
+  margin: 0 14px;
+  padding: 10px 12px;
+  font: 12.5px/1.55 "SF Mono", Menlo, Consolas, monospace;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  resize: vertical;
+  min-height: 240px;
+  background: #fdfdfd;
+  color: #1a1a1a;
+  tab-size: 2;
+}
+#groupContent:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,.15); }
+
+.editor-foot {
+  display: flex;
+  align-items: center;
+  padding: 8px 14px 10px;
+  gap: 12px;
+  min-height: 28px;
+}
+.parse-info { flex: 1; font-size: 11.5px; color: #888; }
+.parse-info.warn { color: #b45309; }
+.parse-info.ok { color: #047857; }
+.save-hint { font-size: 11.5px; color: #888; }
+.save-hint.ok { color: #047857; }
+.save-hint.err { color: #b91c1c; }
+
+/* ---- Buttons ---- */
+.btn {
+  border: 1px solid #d1d5db;
+  background: #fff;
+  color: #333;
+  padding: 5px 12px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.btn:hover { background: #f3f4f6; }
+.btn:active { background: #e5e7eb; }
+.btn.block { width: calc(100% - 20px); margin: 0 10px 10px; }
+.groups .btn.block { background: #fff; }
+.groups .btn.block:hover { background: #e8eaed; }
+
+/* ---- Switch (iOS style) ---- */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  position: relative;
+}
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch .slider {
+  width: 36px; height: 20px;
+  background: #d1d5db;
+  border-radius: 10px;
+  position: relative;
+  transition: background .15s;
+  flex: none;
+}
+.switch .slider::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0,0,0,.2);
+  transition: transform .15s;
+}
+.switch input:checked + .slider { background: #34c759; }
+.switch input:checked + .slider::after { transform: translateX(16px); }
+.switch.small .slider { width: 30px; height: 18px; border-radius: 9px; }
+.switch.small .slider::after { width: 14px; height: 14px; }
+.switch.small input:checked + .slider::after { transform: translateX(12px); }

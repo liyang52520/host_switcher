@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Host Switcher",
+  "version": "1.0.0",
+  "icons": {
+    "16": "icons/icon.svg",
+    "48": "icons/icon.svg",
+    "128": "icons/icon.svg"
+  },
+  "description": "增强版 SwitchHosts，支持端口级 TCP 转发规则。",
+  "permissions": [
+    "proxy",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1:1081/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Host Switcher",
+    "default_popup": "popup.html",
+    "default_icon": "icons/icon.svg"
+  }
+}

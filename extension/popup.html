@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Host Switcher</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Host Switcher</h1>
+    <div class="hint">按 host:port 匹配，URL/证书不变。</div>
+  </header>
+
+  <section class="status">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">检查代理中…</span>
+    <label class="switch global" title="总开关">
+      <input type="checkbox" id="globalEnabled" />
+      <span class="slider"></span>
+      <span class="lbl">启用代理</span>
+    </label>
+  </section>
+
+  <section class="layout">
+    <aside class="groups">
+      <ul id="groupList" class="group-list"></ul>
+      <button id="newGroupBtn" class="btn block">+ 新建组</button>
+    </aside>
+
+    <main class="editor">
+      <div class="editor-empty" id="editorEmpty">
+        <p>← 在左侧新建或选择一个组</p>
+        <p class="muted">每行一条 <code>目标IP[:port]&nbsp;&nbsp;匹配host[:port]</code>（仿 /etc/hosts），<code>#</code> 注释。修改自动保存。</p>
+      </div>
+
+      <div class="editor-body" id="editorBody" hidden>
+        <textarea id="groupContent" rows="20" spellcheck="false" placeholder="# 示例（双击左侧组名可重命名）
+198.51.100.1  internal-api.example.com
+198.51.100.2:8443  internal-svc.example.com:443"></textarea>
+        <div class="editor-foot">
+          <div class="parse-info" id="parseInfo">—</div>
+          <div class="save-hint" id="saveHint"></div>
+        </div>
+      </div>
+    </main>
+  </section>
+
+  <script src="lib/parser.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
