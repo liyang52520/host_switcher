@@ -28,7 +28,7 @@ async function load() {
   const data = await chrome.storage.local.get([GROUPS_KEY, GLOBAL_KEY]);
   return {
     groups: Array.isArray(data[GROUPS_KEY]) ? data[GROUPS_KEY] : DEFAULT_GROUPS,
-    globalEnabled: data[GLOBAL_KEY] !== false,
+    globalEnabled: data[GLOBAL_KEY] === true,
   };
 }
 

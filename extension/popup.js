@@ -26,7 +26,7 @@ function escapeHtml(s) {
 const state = {
   groups: [],
   activeGroupId: null,
-  globalEnabled: true,
+  globalEnabled: false,
 };
 
 // ---- Render: group list ----
