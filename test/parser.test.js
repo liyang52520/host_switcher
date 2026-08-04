@@ -64,6 +64,19 @@ eq('h8 null rawLine', h8.kind, 'blank');
 const h9 = parseBatchLine('10.0.0.1  ', 1);
 eq('h9 missing match column', h9.kind, 'error');
 
+const h10 = parseBatchLine('10.0.0.1  myserver', 1);
+eq('h10 single-label hostname accepted', h10.kind, 'rule');
+eq('h10 single-label host', h10.rule.matchHost, 'myserver');
+
+const h11 = parseBatchLine('10.0.0.1  -bad-.com', 1);
+eq('h11 leading dash rejected', h11.kind, 'error');
+
+const h12 = parseBatchLine('999.999.999.999  example.com', 1);
+eq('h12 ipv4 out of range rejected', h12.kind, 'error');
+
+const h13 = parseBatchLine('01.02.03.04  example.com', 1);
+eq('h13 ipv4 leading zero rejected', h13.kind, 'error');
+
 console.log('\n== parseBatchText 混合 ==');
 const text = `# 示例：内网测试环境
 198.51.100.1  internal-api.example.com
@@ -101,7 +114,7 @@ const groups = [
   { id: 'g3', name: '重叠组', enabled: true,
     content: '198.51.100.1  internal-api.example.com\n10.0.0.2  other.example.com' },
   { id: 'g4', name: '有错误行', enabled: true,
-    content: '10.0.0.5  good.example.com\nbad line\n10.0.0.6:abc badhost' },
+    content: '10.0.0.5  good.example.com\n10.0.0.1  -bad-.com\n10.0.0.6:abc badhost' },
   null,
   { id: 'g5', name: '非对象' },
 ];

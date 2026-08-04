@@ -176,6 +176,23 @@ function refreshParseInfo() {
     const first = errors.slice(0, 2).map((e) => 'L' + e.lineNo + ': ' + e.message).join('\uff1b');
     tip.push('\u26a0 ' + errors.length + ' 行解析失败（' + first + (errors.length > 2 ? '\u2026' : '') + '）');
   }
+  // 冲突检测：找出当前组中被其他启用组覆盖的规则
+  // compileActiveRules 按 first-wins 去重，如果某条规则的 groupId 不是当前组，
+  // 说明当前组的同 matchHost+matchPort 规则被更早的启用组覆盖了
+  if (g.enabled && rules.length) {
+    const compiled = compileActiveRules(state.groups);
+    const myRules = compiled.rules.filter((r) => r.groupId === g.id);
+    // 当前组的输入规则中，哪些没有出现在 compiled.rules 的本组规则里 → 被覆盖
+    const myKeys = new Set(myRules.map((r) => r.matchHost + '|' + (r.matchPort || '')));
+    const shadowed = rules.filter((r) => !myKeys.has(r.matchHost + '|' + (r.matchPort || '')));
+    if (shadowed.length) {
+      const examples = shadowed.slice(0, 2).map((r) => r.matchHost + (r.matchPort ? ':' + r.matchPort : ''));
+      tip.push('\u26a0 ' + shadowed.length + ' 条被其他组覆盖（' + examples.join('\u3001') + (shadowed.length > 2 ? '\u2026' : '') + '）');
+      el.textContent = tip.join(' \u00b7 ');
+      el.className = 'parse-info conflict';
+      return;
+    }
+  }
   el.textContent = tip.join(' \u00b7 ');
   el.className = 'parse-info' + (errors.length ? ' warn' : ' ok');
 }
@@ -315,7 +332,15 @@ async function save() {
       return;
     }
     if (res && res.ok === false) {
-      flashSaveHint('保存失败：' + (res.error || '未知错误'), 'err');
+      // 友好处理常见错误
+      if (res.error === 'proxyNotRunning') {
+        // 规则已存到 storage，只是无法推送到代理；不算失败
+        flashSaveHint('规则已保存（代理未运行，启动后会自动推送）', 'ok');
+      } else if (res.error === 'unauthorized') {
+        flashSaveHint('保存失败：token 未配置或错误，请点击 ⚙ 设置', 'err');
+      } else {
+        flashSaveHint('保存失败：' + (res.error || '未知错误'), 'err');
+      }
     }
     await refreshStatus();
   } finally {
@@ -482,7 +507,30 @@ $('globalEnabled').addEventListener('change', async (e) => {
   await initPromise;
   state.globalEnabled = !!(e && e.target && e.target.checked);
   try {
-    await chrome.runtime.sendMessage({ type: 'setEnabled', enabled: state.globalEnabled });
+    const res = await chrome.runtime.sendMessage({ type: 'setEnabled', enabled: state.globalEnabled });
+    // 启用失败（代理未运行）：恢复 UI 状态并提示用户
+    if (state.globalEnabled && res && res.ok === false && res.error === 'proxyNotRunning') {
+      state.globalEnabled = false;
+      const ge = $('globalEnabled');
+      if (ge) ge.checked = false;
+      flashSaveHint('代理未运行，请先启动 proxy/proxy.js', 'err');
+      await refreshStatus();
+      renderGroups();
+      return;
+    }
+    // 启用失败（代理要求鉴权但未配置 token）：恢复 UI 并提示用户
+    if (state.globalEnabled && res && res.ok === false && res.error === 'tokenNotConfigured') {
+      state.globalEnabled = false;
+      const ge = $('globalEnabled');
+      if (ge) ge.checked = false;
+      flashSaveHint('代理要求鉴权，请先点击 ⚙ 配置 token', 'err');
+      await refreshStatus();
+      renderGroups();
+      return;
+    }
+    if (res && res.ok === false) {
+      flashSaveHint('切换总开关失败：' + (res.error || '未知错误'), 'err');
+    }
   } catch (err) {
     console.error('[hostswitcher] setEnabled failed', err);
     flashSaveHint('切换总开关失败：' + (err && err.message ? err.message : err), 'err');
@@ -492,7 +540,141 @@ $('globalEnabled').addEventListener('change', async (e) => {
   renderGroups(); // 刷新组开关的 disabled 状态
 });
 
+// ---- 设置面板（token 配置）----
+
+$('settingsBtn').addEventListener('click', async () => {
+  const overlay = $('settingsOverlay');
+  const input = $('tokenInput');
+  const statusEl = $('tokenStatus');
+  if (!overlay) return;
+  // 打开时从 background 拉取当前 token 配置状态
+  const res = await chrome.runtime.sendMessage({ type: 'getState' });
+  const tokenConfigured = !!(res && res.tokenConfigured);
+  const authRequired = !!(res && res.status && res.status.authRequired);
+  if (input) input.value = ''; // 出于安全考虑不回显已保存的 token
+  if (statusEl) {
+    if (authRequired && !tokenConfigured) {
+      statusEl.textContent = '代理要求鉴权，但尚未配置 token —— 规则推送会失败';
+      statusEl.className = 'token-status err';
+    } else if (tokenConfigured) {
+      statusEl.textContent = '已配置 token';
+      statusEl.className = 'token-status ok';
+    } else {
+      statusEl.textContent = '代理未启用鉴权（可选配置）';
+      statusEl.className = 'token-status';
+    }
+  }
+  overlay.hidden = false;
+});
+
+$('closeSettings').addEventListener('click', () => {
+  $('settingsOverlay').hidden = true;
+});
+
+// 点击遮罩关闭设置面板
+$('settingsOverlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) e.currentTarget.hidden = true;
+});
+
+$('saveTokenBtn').addEventListener('click', async () => {
+  const input = $('tokenInput');
+  const statusEl = $('tokenStatus');
+  const token = input ? input.value.trim() : '';
+  if (!token) {
+    if (statusEl) { statusEl.textContent = '请输入 token'; statusEl.className = 'token-status err'; }
+    return;
+  }
+  const res = await chrome.runtime.sendMessage({ type: 'setToken', token });
+  if (res && res.ok) {
+    if (statusEl) { statusEl.textContent = '✓ token 已保存并验证通过'; statusEl.className = 'token-status ok'; }
+    if (input) input.value = '';
+    setTimeout(() => { $('settingsOverlay').hidden = true; }, 800);
+  } else {
+    const err = (res && res.error) || 'unknown';
+    const msg = err === 'unauthorized' ? 'token 错误，代理拒绝推送' : '保存失败：' + err;
+    if (statusEl) { statusEl.textContent = msg; statusEl.className = 'token-status err'; }
+  }
+});
+
+$('clearTokenBtn').addEventListener('click', async () => {
+  const statusEl = $('tokenStatus');
+  await chrome.runtime.sendMessage({ type: 'setToken', token: '' });
+  const input = $('tokenInput');
+  if (input) input.value = '';
+  if (statusEl) { statusEl.textContent = 'token 已清除（若代理已启用将自动禁用）'; statusEl.className = 'token-status'; }
+  // 清除 token 后代理可能已被禁用，刷新 UI 状态
+  await refreshStatus();
+  renderGroups();
+});
+
+// ---- 导入 / 导出 ----
+
+$('exportBtn').addEventListener('click', () => {
+  const data = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    globalEnabled: state.globalEnabled,
+    groups: state.groups,
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'hostswitcher-export-' + new Date().toISOString().slice(0, 10) + '.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  flashSaveHint('已导出 ' + state.groups.length + ' 个组', 'ok');
+});
+
+$('importBtn').addEventListener('click', () => {
+  $('importFileInput').click();
+});
+
+$('importFileInput').addEventListener('change', async (e) => {
+  const file = e && e.target && e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!data || !Array.isArray(data.groups)) {
+      flashSaveHint('导入失败：文件格式不正确（缺少 groups 数组）', 'err');
+      return;
+    }
+    // 合并策略：同 ID 覆盖，新 ID 追加；用户可选是否保留现有组
+    const existingIds = new Set(state.groups.map((g) => g && g.id).filter(Boolean));
+    const importedNew = data.groups.filter((g) => g && g.id && !existingIds.has(g.id));
+    const importedOverwrite = data.groups.filter((g) => g && g.id && existingIds.has(g.id));
+    let msg = '导入 ' + data.groups.length + ' 个组';
+    if (importedOverwrite.length) msg += '（其中 ' + importedOverwrite.length + ' 个覆盖现有同名组）';
+    if (importedOverwrite.length && !confirm('检测到 ' + importedOverwrite.length + ' 个同 ID 组，是否覆盖？点击取消则仅导入新组')) {
+      // 仅导入新组
+      state.groups = state.groups.concat(importedNew);
+      msg = '导入 ' + importedNew.length + ' 个新组（跳过 ' + importedOverwrite.length + ' 个同 ID 组）';
+    } else {
+      // 覆盖 + 追加
+      const map = new Map(state.groups.map((g) => [g.id, g]));
+      for (const g of data.groups) {
+        if (g && g.id) map.set(g.id, g);
+      }
+      state.groups = Array.from(map.values());
+    }
+    // 选中第一个组
+    if (state.groups.length) state.activeGroupId = state.groups[0].id;
+    renderGroups();
+    renderEditor();
+    await save();
+    flashSaveHint(msg, 'ok');
+  } catch (err) {
+    flashSaveHint('导入失败：' + (err && err.message ? err.message : err), 'err');
+  } finally {
+    // 重置 input 允许重复导入同一文件
+    e.target.value = '';
+  }
+});
+
 // 启动
 initState();
-// 定时轮询代理状态（2 秒间隔）
-const statusPollTimer = setInterval(refreshStatus, 2000);
+// 定时轮询代理状态（5 秒间隔：足够及时检测代理启停，避免过度请求）
+const statusPollTimer = setInterval(refreshStatus, 5000);

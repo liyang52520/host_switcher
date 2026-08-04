@@ -11,17 +11,97 @@
  *   HOSTSWITCHER_SOCKS_PORT  默认 1080
  *   HOSTSWITCHER_ADMIN_PORT  默认 1081
  *   HOSTSWITCHER_ADMIN_BODY_LIMIT  管理 POST body 字节数上限，默认 100MB
+ *   HOSTSWITCHER_TOKEN       管理 API 鉴权 token；未设置时自动生成并写入 ~/.hostswitcher/token
  */
 'use strict';
 
 const net = require('net');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
 
 const SOCKS_PORT = parseInt(process.env.HOSTSWITCHER_SOCKS_PORT || '1080', 10);
 const ADMIN_PORT = parseInt(process.env.HOSTSWITCHER_ADMIN_PORT || '1081', 10);
 const ADMIN_BODY_LIMIT = parseInt(process.env.HOSTSWITCHER_ADMIN_BODY_LIMIT || String(100 * 1024 * 1024), 10);
 
-let rules = [];
+const DATA_DIR = path.join(os.homedir(), '.hostswitcher');
+const RULES_FILE = path.join(DATA_DIR, 'rules.json');
+const TOKEN_FILE = path.join(DATA_DIR, 'token');
+
+// ---- 持久化 & 鉴权 ----
+function ensureDataDir() {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 }); } catch (_) {}
+}
+
+function loadRulesFromDisk() {
+  try {
+    const raw = fs.readFileSync(RULES_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    if (Array.isArray(data.rules)) {
+      return { version: Number(data.version) || 0, rules: data.rules };
+    }
+  } catch (_) {}
+  return { version: 0, rules: [] };
+}
+
+function saveRulesToDisk(version, rulesArr) {
+  try {
+    fs.writeFile(
+      RULES_FILE,
+      JSON.stringify({ version, rules: rulesArr, savedAt: Date.now() }),
+      { mode: 0o600 },
+      (e) => { if (e) console.error('[proxy] saveRules failed: ' + (e.message || e)); }
+    );
+  } catch (e) {
+    console.error('[proxy] saveRules sync failed: ' + (e.message || e));
+  }
+}
+
+function loadOrCreateToken() {
+  // 优先环境变量
+  if (process.env.HOSTSWITCHER_TOKEN) return process.env.HOSTSWITCHER_TOKEN;
+  // 从文件加载
+  try {
+    const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+    if (t) return t;
+  } catch (_) {}
+  // 生成新 token（32 字节随机 hex = 64 字符）
+  const newToken = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(TOKEN_FILE, newToken, { mode: 0o600 });
+    console.log('[proxy] Generated auth token -> ' + TOKEN_FILE);
+    console.log('[proxy] Token preview: ' + newToken.slice(0, 8) + '... (full token in file, copy with: cat ~/.hostswitcher/token | pbcopy)');
+  } catch (e) {
+    console.error('[proxy] Failed to write token file: ' + (e.message || e));
+    return ''; // 鉴权关闭（不安全），但允许启动
+  }
+  return newToken;
+}
+
+ensureDataDir();
+const initialState = loadRulesFromDisk();
+let rules = initialState.rules;
+let rulesVersion = initialState.version;
+const AUTH_TOKEN = loadOrCreateToken();
+
+// 常量时间比较，防时序攻击
+function checkAuth(req) {
+  if (!AUTH_TOKEN) return true; // 未配置 token 时鉴权关闭
+  const h = req.headers.authorization || '';
+  const m = /^Bearer\s+(.+)$/i.exec(h);
+  if (!m) return false;
+  const a = Buffer.from(m[1].trim());
+  const b = Buffer.from(AUTH_TOKEN);
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch (_) { return false; }
+}
+
+function unauthorized(res) {
+  res.writeHead(401, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+}
 
 
 function findRule(host, port) {
@@ -189,69 +269,104 @@ socksServer.on('error', (e) => {
 });
 
 // ---- Admin HTTP server ----
+// 安全：只接受来自本机扩展的请求，拒绝任意网页跨域访问。
+// 扩展的 origin 形如 chrome-extension://<id>，运行时无法预知 id，
+// 因此动态反射 Origin（仅限 chrome-extension scheme），并附加 Vary 头。
+function isAllowedOrigin(origin) {
+  return typeof origin === 'string' && /^chrome-extension:\/\/[a-z0-9]+$/i.test(origin);
+}
+
 const adminServer = http.createServer((req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  const origin = req.headers.origin || '';
+  if (isAllowedOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'false');
+  }
+  // 没有 Origin 头的请求（curl、扩展 service worker 直接 fetch 不带 Origin）
+  // 允许放行：本机任意进程本来就无需 CORS 即可访问 127.0.0.1
+  // 这里拦截的是"网页 JS 跨域读到响应内容"的攻击面
 
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
-  if (req.method === 'GET' && req.url === '/rules') {
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify(rules));
-    return;
-  }
-
+  // /status 公开（不暴露规则内容，仅返回运行状态 + 版本号用于一致性检测）
   if (req.method === 'GET' && req.url === '/status') {
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({
       running: true,
       rulesCount: rules.length,
+      rulesVersion,
       socksPort: SOCKS_PORT,
+      authRequired: !!AUTH_TOKEN,
     }));
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/rules') {
-    // 限制 body 大小，防止被本地恶意进程塞大文件
-    let size = 0;
-    let body = '';
-    let aborted = false;
-    req.on('data', (chunk) => {
-      if (aborted) return;
-      size += chunk.length;
-      if (size > ADMIN_BODY_LIMIT) {
-        aborted = true;
-        try { req.destroy(); } catch (_) {}
-        return;
-      }
-      body += chunk;
-    });
-    req.on('end', () => {
-      if (aborted) {
-        res.writeHead(413, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'body too large' }));
-        return;
-      }
-      try {
-        const next = JSON.parse(body);
-        if (!Array.isArray(next)) throw new Error('rules must be an array');
-        rules = next;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ ok: true, count: rules.length }));
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: e && e.message ? e.message : String(e) }));
-      }
-    });
-    req.on('error', (e) => {
-      if (res.writableEnded) return;
-      try {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: e && e.message ? e.message : String(e) }));
-      } catch (_) {}
-    });
-    return;
+  // /rules（GET 读取、POST 写入）需要鉴权，防止本机恶意进程窃取/篡改规则
+  if (req.url === '/rules') {
+    if (!checkAuth(req)) { unauthorized(res); return; }
+
+    if (req.method === 'GET') {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ version: rulesVersion, rules }));
+      return;
+    }
+
+    if (req.method === 'POST') {
+      // 限制 body 大小，防止被本地恶意进程塞大文件
+      let size = 0;
+      let body = '';
+      let aborted = false;
+      req.on('data', (chunk) => {
+        if (aborted) return;
+        size += chunk.length;
+        if (size > ADMIN_BODY_LIMIT) {
+          aborted = true;
+          try { req.destroy(); } catch (_) {}
+          return;
+        }
+        body += chunk;
+      });
+      req.on('end', () => {
+        if (aborted) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'body too large' }));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(body);
+          // 兼容两种格式：{version, rules} 或纯数组（向后兼容）
+          let nextRules, nextVersion;
+          if (Array.isArray(parsed)) {
+            nextRules = parsed;
+            nextVersion = rulesVersion + 1;
+          } else if (parsed && Array.isArray(parsed.rules)) {
+            nextRules = parsed.rules;
+            nextVersion = Number(parsed.version) || (rulesVersion + 1);
+          } else {
+            throw new Error('expected array or {version, rules}');
+          }
+          rules = nextRules;
+          rulesVersion = nextVersion;
+          saveRulesToDisk(rulesVersion, rules);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true, count: rules.length, version: rulesVersion }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e && e.message ? e.message : String(e) }));
+        }
+      });
+      req.on('error', (e) => {
+        if (res.writableEnded) return;
+        try {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e && e.message ? e.message : String(e) }));
+        } catch (_) {}
+      });
+      return;
+    }
   }
 
   res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -268,6 +383,12 @@ adminServer.on('error', (e) => {
 
 function shutdown() {
   console.log('\n[proxy] Shutting down...');
+  // 同步保存规则，确保退出时不丢失
+  try {
+    fs.writeFileSync(RULES_FILE, JSON.stringify({ version: rulesVersion, rules, savedAt: Date.now() }), { mode: 0o600 });
+  } catch (e) {
+    console.error('[proxy] shutdown save failed: ' + (e.message || e));
+  }
   try { socksServer.close(); } catch (_) {}
   try { adminServer.close(); } catch (_) {}
   setTimeout(() => process.exit(0), 100);

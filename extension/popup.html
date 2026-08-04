@@ -24,7 +24,14 @@
   <section class="layout">
     <aside class="groups">
       <ul id="groupList" class="group-list"></ul>
-      <button id="newGroupBtn" class="btn block">+ 新建组</button>
+      <div class="group-actions">
+        <button id="newGroupBtn" class="btn block">+ 新建组</button>
+        <div class="io-actions">
+          <button id="importBtn" class="btn small" title="从 JSON 文件导入规则">导入</button>
+          <button id="exportBtn" class="btn small" title="导出所有规则到 JSON 文件">导出</button>
+          <button id="settingsBtn" class="btn small icon-btn" title="设置">⚙</button>
+        </div>
+      </div>
     </aside>
 
     <main class="editor">
@@ -44,6 +51,32 @@
       </div>
     </main>
   </section>
+
+  <!-- 设置面板（默认隐藏，覆盖整个 popup） -->
+  <section class="settings-overlay" id="settingsOverlay" hidden>
+    <div class="settings-card">
+      <div class="settings-header">
+        <h2>设置</h2>
+        <button id="closeSettings" class="btn small icon-btn" title="关闭">×</button>
+      </div>
+      <div class="settings-body">
+        <label class="settings-label" for="tokenInput">Admin API Token</label>
+        <input type="password" id="tokenInput" placeholder="从 ~/.hostswitcher/token 复制" autocomplete="off" />
+        <div class="settings-hint">
+          代理首次启动时会自动生成 token 并写入 <code>~/.hostswitcher/token</code>（权限 0600）。<br>
+          复制该文件完整内容粘贴到此处，保存后扩展才能推送规则。
+        </div>
+        <div class="settings-actions">
+          <button id="saveTokenBtn" class="btn">保存</button>
+          <button id="clearTokenBtn" class="btn">清除</button>
+        </div>
+        <div id="tokenStatus" class="token-status"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 隐藏的文件输入，用于导入 -->
+  <input type="file" id="importFileInput" accept=".json,application/json" hidden />
 
   <script src="lib/parser.js"></script>
   <script src="popup.js"></script>

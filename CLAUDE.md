@@ -42,7 +42,7 @@ README.md
 - `extension/background.js` — Service worker: manages Chrome proxy settings via `chrome.proxy.settings`, pushes compiled rules to proxy admin endpoint (`127.0.0.1:1081/rules`), persists rules to `chrome.storage.local`
 - `extension/popup.js` — Popup UI logic (group list + hosts text editor), debounce auto-save, inline rename via dblclick
 - `extension/lib/parser.js` — Pure parsing functions (`parseBatchLine`, `parseBatchText`, `compileActiveRules`, `countGroup`), works in both browser `<script>` and Node.js `require()`
-- `proxy/proxy.js` — Node.js SOCKS5 proxy (net.createServer) on 127.0.0.1:1080, admin HTTP server on 127.0.0.1:1081, rules persisted to `~/.hostswitcher/rules.json`
+- `proxy/proxy.js` — Node.js SOCKS5 proxy (net.createServer) on 127.0.0.1:1080, admin HTTP server on 127.0.0.1:1081, rules stored in memory (lost on restart, re-pushed by extension on startup/health-check recovery)
 
 ## Rule Format
 
@@ -69,5 +69,21 @@ cd proxy && ./start-proxy.sh
 ## Environment Variables (proxy/proxy.js)
 
 - `HOSTSWITCHER_SOCKS_PORT` — SOCKS5 listen port (default: 1080)
-- `HOSTSWITCHER_ADMIN_PORT` — Admin HTTP listen port (default: 1081)
+- `HOSTSWITCHER_ADMIN_PORT` — Admin HTTP server port (default: 1081)
 - `HOSTSWITCHER_ADMIN_BODY_LIMIT` — Admin POST body size limit (default: 100MB)
+- `HOSTSWITCHER_TOKEN` — Admin API auth token. If unset, proxy auto-generates a random token and writes it to `~/.hostswitcher/token` (mode 0600) on first start. The token must be configured in the extension's settings (⚙ button) before rules can be pushed.
+
+## Persistence & Auth
+
+- **Rules**: Proxy persists rules to `~/.hostswitcher/rules.json` (JSON: `{version, rules, savedAt}`). On restart, rules are loaded from disk. The extension also re-pushes rules on health-check recovery (dead→alive transition) or version mismatch.
+- **Token**: `~/.hostswitcher/token` (mode 0600). The extension reads it via the settings UI; all `/rules` GET/POST requests must include `Authorization: Bearer <token>`. `/status` is public (no rules content exposed).
+- **Version sync**: Each rule push includes an incrementing version number. `GET /status` returns the current `rulesVersion`. The extension's health check compares versions and re-pushes on mismatch, preventing silent rule loss after proxy restart.
+
+## Import/Export
+
+- **Export**: Click "导出" to download all groups + global state as a JSON file (`hostswitcher-export-YYYY-MM-DD.json`).
+- **Import**: Click "导入" to load a previously exported JSON file. Same-ID groups can be overwritten or skipped (user chooses via confirm dialog).
+
+## Conflict Visualization
+
+- When multiple enabled groups define rules for the same `matchHost[:port]`, the editor's parse-info bar shows how many rules in the current group are shadowed by earlier groups (first-wins dedup).
