@@ -19,6 +19,7 @@ const PROXY_CONFIG = {
 const ADMIN_URL = 'http://127.0.0.1:1081';
 const GROUPS_KEY = 'hostSwitcherGroups';
 const GLOBAL_KEY = 'hostSwitcherGlobalEnabled';
+const AUTO_DISABLED_KEY = 'hostSwitcherAutoDisabled'; // 标记代理是否被自动关闭（非用户主动操作）
 const TOKEN_KEY = 'hostSwitcherToken'; // 代理 admin API 鉴权 token
 const LEGACY_KEY = 'hostSwitcherRules'; // v1 旧 key，install/update 时一次性清理
 
@@ -26,10 +27,11 @@ const DEFAULT_GROUPS = []; // 首次安装从空开始，用户点 + 新建组
 
 async function load() {
   // 注意：LEGACY_KEY 的清理放在 onInstalled 里，不在 load 里（避免每次消息都跑一次 storage roundtrip）
-  const data = await chrome.storage.local.get([GROUPS_KEY, GLOBAL_KEY, TOKEN_KEY]);
+  const data = await chrome.storage.local.get([GROUPS_KEY, GLOBAL_KEY, AUTO_DISABLED_KEY, TOKEN_KEY]);
   return {
     groups: Array.isArray(data[GROUPS_KEY]) ? data[GROUPS_KEY] : DEFAULT_GROUPS,
     globalEnabled: data[GLOBAL_KEY] === true,
+    autoDisabled: data[AUTO_DISABLED_KEY] === true,
     token: typeof data[TOKEN_KEY] === 'string' ? data[TOKEN_KEY] : '',
   };
 }
@@ -103,8 +105,9 @@ async function healthCheck() {
   if (healthInFlight) return;
   healthInFlight = true;
   try {
-    const { globalEnabled } = await load();
-    if (!globalEnabled) {
+    const { globalEnabled, autoDisabled } = await load();
+    // 用户主动关闭且未被自动关闭 → 无需轮询
+    if (!globalEnabled && !autoDisabled) {
       healthTimer = null; // 清除旧 timer ID，允许 startHealthChecks 重新启动
       lastProxyRunning = false;
       recoveredPulses = 0;
@@ -112,23 +115,31 @@ async function healthCheck() {
     }
     const status = await fetchStatus();
     if (!status.running) {
-      // 代理已死 → 立即清除 Chrome 代理设置，恢复网络
-      // 必须检查返回值：若清理失败（如 SW 即将终止、API 异常），
-      // 不能更新 globalEnabled=false，否则会陷入"已禁用但代理设置未清理"的死锁
-      const r = await setProxyEnabled(false);
-      if (r && r.ok) {
-        await chrome.storage.local.set({ [GLOBAL_KEY]: false });
-        healthTimer = null; // 已禁用，停止轮询
-        lastProxyRunning = false;
-        recoveredPulses = 0;
-        return;
+      // 代理已死
+      if (globalEnabled) {
+        // 场景：代理原本是开启的 → 自动关闭（标记为 autoDisabled）
+        const r = await setProxyEnabled(false);
+        if (r && r.ok) {
+          await chrome.storage.local.set({ [GLOBAL_KEY]: false, [AUTO_DISABLED_KEY]: true });
+        } else {
+          // 清理失败：保留 globalEnabled=true，下次重试
+          console.error('[hostswitcher] healthCheck: setProxyEnabled(false) failed, will retry', r && r.error);
+          healthTimer = setTimeout(healthCheck, HEALTH_INTERVAL_FAIL);
+          return;
+        }
       }
-      // 清理失败：保留 globalEnabled=true，下次 alarm/setTimeout 继续重试
-      console.error('[hostswitcher] healthCheck: setProxyEnabled(false) failed, will retry', r && r.error);
-      healthTimer = setTimeout(healthCheck, HEALTH_INTERVAL_FAIL);
+      // 已处于 autoDisabled 状态 → 继续轮询等待代理恢复
+      lastProxyRunning = false;
+      recoveredPulses = 0;
+      healthTimer = setTimeout(healthCheck, HEALTH_INTERVAL_OK);
       return;
     }
     // 代理正常运行
+    if (!globalEnabled && autoDisabled) {
+      // 场景：代理从自动关闭中恢复 → 自动重新启用
+      await setProxyEnabled(true);
+      await chrome.storage.local.set({ [GLOBAL_KEY]: true, [AUTO_DISABLED_KEY]: false });
+    }
     // 检测"从死到活"转换或版本号不一致：代理可能刚重启（内存 rules 丢失）或规则未同步
     const needsResync = !lastProxyRunning ||
       (typeof status.rulesVersion === 'number' && status.rulesVersion !== rulesVersion);
@@ -165,12 +176,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
-      const { groups, globalEnabled, token } = await load();
+      const { groups, globalEnabled, autoDisabled, token } = await load();
       switch (msg && msg.type) {
         case 'save': {
+          // 只保存组数据；globalEnabled 由 setEnabled / healthCheck 管理
           await chrome.storage.local.set({
             [GROUPS_KEY]: msg.groups,
-            [GLOBAL_KEY]: msg.globalEnabled,
           });
           const pushResult = await pushRules(msg.compiledRules || []);
           // token 错误：规则已存 storage 但未推送到代理，返回特定错误让 popup 提示
@@ -178,21 +189,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             sendResponse({ ok: false, error: 'unauthorized' });
             break;
           }
-          // 启用代理前必须确认代理实际在运行，否则会让浏览器流量指向死代理。
-          // 关闭则无条件执行（兜底清理）。
+          // 如果 popup 认为代理已启用且代理实际在运行 → 确保 Chrome 代理设置已启用
+          // 如果 popup 认为已启用但代理未运行 → 仅报告错误，不修改 globalEnabled（由 healthCheck 管理）
           if (msg.globalEnabled) {
             const status = await fetchStatus();
             if (status.running) {
               await setProxyEnabled(true);
+              await chrome.storage.local.set({ [AUTO_DISABLED_KEY]: false });
               startHealthChecks();
             } else {
-              // 代理未运行：不能启用 Chrome 代理设置，同步 globalEnabled=false
-              await chrome.storage.local.set({ [GLOBAL_KEY]: false });
               sendResponse({ ok: false, error: 'proxyNotRunning' });
               break;
             }
-          } else {
-            await setProxyEnabled(false);
           }
           sendResponse({ ok: true });
           break;
@@ -202,16 +210,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           // 代理未运行时必须无条件清理 Chrome 代理设置，否则浏览器流量会继续指向死代理。
           // 不依赖 globalEnabled：若上次清理失败导致状态错位，这里能兜底恢复网络。
           if (!status.running) {
-            const r = await setProxyEnabled(false);
-            if (r && r.ok) {
-              await chrome.storage.local.set({ [GLOBAL_KEY]: false });
-              sendResponse({ groups, globalEnabled: false, status, tokenConfigured: !!token });
+            if (globalEnabled) {
+              // 代理原本是开启的 → 自动关闭并标记 autoDisabled
+              const r = await setProxyEnabled(false);
+              if (r && r.ok) {
+                await chrome.storage.local.set({ [GLOBAL_KEY]: false, [AUTO_DISABLED_KEY]: true });
+                sendResponse({ groups, globalEnabled: false, autoDisabled: true, status, tokenConfigured: !!token });
+              } else {
+                // 清理失败时保留原状态，下次 getState / healthCheck 继续重试
+                sendResponse({ groups, globalEnabled, autoDisabled, status, tokenConfigured: !!token });
+              }
             } else {
-              // 清理失败时保留原状态，下次 getState / healthCheck 继续重试
-              sendResponse({ groups, globalEnabled, status, tokenConfigured: !!token });
+              sendResponse({ groups, globalEnabled, autoDisabled, status, tokenConfigured: !!token });
             }
           } else {
-            sendResponse({ groups, globalEnabled, status, tokenConfigured: !!token });
+            // 代理正常运行
+            if (!globalEnabled && autoDisabled) {
+              // 从自动关闭中恢复 → 自动重新启用
+              await setProxyEnabled(true);
+              await chrome.storage.local.set({ [GLOBAL_KEY]: true, [AUTO_DISABLED_KEY]: false });
+              sendResponse({ groups, globalEnabled: true, autoDisabled: false, status, tokenConfigured: !!token });
+            } else {
+              sendResponse({ groups, globalEnabled, autoDisabled, status, tokenConfigured: !!token });
+            }
           }
           break;
         }
@@ -225,7 +246,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             // 启用前必须确认代理实际在运行
             const status = await fetchStatus();
             if (!status.running) {
-              await chrome.storage.local.set({ [GLOBAL_KEY]: false });
+              await chrome.storage.local.set({ [GLOBAL_KEY]: false, [AUTO_DISABLED_KEY]: true });
               await setProxyEnabled(false);
               sendResponse({ ok: false, error: 'proxyNotRunning' });
               break;
@@ -235,17 +256,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             if (status.authRequired) {
               const { token } = await load();
               if (!token) {
-                await chrome.storage.local.set({ [GLOBAL_KEY]: false });
+                await chrome.storage.local.set({ [GLOBAL_KEY]: false, [AUTO_DISABLED_KEY]: true });
                 await setProxyEnabled(false);
                 sendResponse({ ok: false, error: 'tokenNotConfigured' });
                 break;
               }
             }
-            await chrome.storage.local.set({ [GLOBAL_KEY]: true });
+            await chrome.storage.local.set({ [GLOBAL_KEY]: true, [AUTO_DISABLED_KEY]: false });
             await setProxyEnabled(true);
             startHealthChecks();
           } else {
-            await chrome.storage.local.set({ [GLOBAL_KEY]: false });
+            // 用户主动关闭 → 清除 autoDisabled 标记
+            await chrome.storage.local.set({ [GLOBAL_KEY]: false, [AUTO_DISABLED_KEY]: false });
             await setProxyEnabled(false);
           }
           sendResponse({ ok: true });
@@ -278,7 +300,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             if (globalEnabled) {
               const status = await fetchStatus();
               if (status.running && status.authRequired) {
-                await chrome.storage.local.set({ [GLOBAL_KEY]: false });
+                await chrome.storage.local.set({ [GLOBAL_KEY]: false, [AUTO_DISABLED_KEY]: true });
                 await setProxyEnabled(false);
                 lastProxyRunning = false;
                 recoveredPulses = 0;
@@ -328,6 +350,7 @@ chrome.runtime.onInstalled.addListener(async () => {
       // 必须全部 await：onInstalled 返回后 SW 可能被终止，未完成的操作会丢失
       await pushActiveRulesWithRetry();
       await setProxyEnabled(true);
+      await chrome.storage.local.set({ [AUTO_DISABLED_KEY]: false });
       lastProxyRunning = true;
       startHealthChecks();
     } else {
@@ -336,7 +359,7 @@ chrome.runtime.onInstalled.addListener(async () => {
       // 不显式 clear 会导致浏览器无法访问任何网页。
       const r = await setProxyEnabled(false);
       if (r && r.ok) {
-        await chrome.storage.local.set({ [GLOBAL_KEY]: false });
+        await chrome.storage.local.set({ [GLOBAL_KEY]: false, [AUTO_DISABLED_KEY]: true });
       }
     }
   } else {
@@ -346,10 +369,14 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  const { globalEnabled } = await load();
+  const { globalEnabled, autoDisabled } = await load();
   if (!globalEnabled) {
     // 浏览器重启后 Chrome 代理设置可能仍是上次的脏配置，必须兜底清理
     await setProxyEnabled(false);
+    // 如果之前是自动关闭的，启动健康检查等待代理恢复
+    if (autoDisabled) {
+      startHealthChecks();
+    }
     return;
   }
   const status = await fetchStatus();
@@ -357,13 +384,14 @@ chrome.runtime.onStartup.addListener(async () => {
     // 必须全部 await：onStartup 返回后 SW 可能被终止
     await pushActiveRulesWithRetry();
     await setProxyEnabled(true);
+    await chrome.storage.local.set({ [AUTO_DISABLED_KEY]: false });
     lastProxyRunning = true;
     startHealthChecks();
   } else {
-    // 代理未运行：清理 Chrome 代理设置 + 同步 globalEnabled=false
+    // 代理未运行：清理 Chrome 代理设置 + 标记 autoDisabled
     const r = await setProxyEnabled(false);
     if (r && r.ok) {
-      await chrome.storage.local.set({ [GLOBAL_KEY]: false });
+      await chrome.storage.local.set({ [GLOBAL_KEY]: false, [AUTO_DISABLED_KEY]: true });
     }
   }
 });

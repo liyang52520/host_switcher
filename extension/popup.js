@@ -27,6 +27,7 @@ const state = {
   groups: [],
   activeGroupId: null,
   globalEnabled: false,
+  autoDisabled: false,
 };
 
 // ---- Render: group list ----
@@ -211,7 +212,7 @@ function flashSaveHint(text, kind) {
   }
 }
 
-function setStatus(running, info) {
+function setStatus(running, info, autoDisabled) {
   const dot = $('statusDot');
   const text = $('statusText');
   const ge = $('globalEnabled');
@@ -227,7 +228,9 @@ function setStatus(running, info) {
     }
   } else {
     dot.className = 'dot err';
-    text.textContent = '代理未运行 — 请先启动 proxy/proxy.js';
+    text.textContent = autoDisabled
+      ? '代理未运行 \u2014 恢复后将自动启用'
+      : '代理未运行 \u2014 请先启动 proxy/proxy.js';
     text.title = (info && info.error) || '';
     if (ge) {
       ge.disabled = true;
@@ -251,6 +254,9 @@ async function initState() {
     if (res && typeof res.globalEnabled === 'boolean') {
       state.globalEnabled = res.globalEnabled;
     }
+    if (res && typeof res.autoDisabled === 'boolean') {
+      state.autoDisabled = res.autoDisabled;
+    }
     // 选中第一个未选中的组
     if (state.groups.length && !state.groups.find((g) => g && g.id === state.activeGroupId)) {
       state.activeGroupId = state.groups[0].id;
@@ -258,7 +264,7 @@ async function initState() {
     const ge = $('globalEnabled');
     if (ge) ge.checked = state.globalEnabled;
     const running = res && res.status && res.status.running;
-    setStatus(running, res && res.status);
+    setStatus(running, res && res.status, state.autoDisabled);
     // 刚打开 popup 时代理已在运行 → 确保规则已推送（应对代理重启场景）
     if (running) {
       const { rules } = compileActiveRules(state.groups);
@@ -288,8 +294,11 @@ async function refreshStatus() {
       const ge = $('globalEnabled');
       if (ge) ge.checked = state.globalEnabled;
     }
+    if (typeof st.autoDisabled === 'boolean') {
+      state.autoDisabled = st.autoDisabled;
+    }
     const running = !!(st.status && st.status.running);
-    setStatus(running, st.status);
+    setStatus(running, st.status, state.autoDisabled);
     // 检测代理从不可用变为可用 → 自动重新推送规则
     if (running && !prevRunning) {
       const { rules } = compileActiveRules(state.groups);
